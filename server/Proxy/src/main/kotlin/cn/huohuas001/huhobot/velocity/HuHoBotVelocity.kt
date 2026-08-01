@@ -90,20 +90,15 @@ class HuHoBotVelocity @Inject constructor(
 
     @Subscribe
     fun onProxyShutdown(event: ProxyShutdownEvent) {
-        // 断开 Redis
         redisManager?.disconnect()
-
         ClientManager.setShouldReconnect(false)
         ClientManager.shutdownClient()
     }
 
     override fun broadcastMessage(msg: String) {
-        // 先在 Velocity 广播
         server.allPlayers.forEach { player ->
             player.sendMessage(net.kyori.adventure.text.Component.text(msg))
         }
-
-        // 如果 Redis 已连接，也发送到子服务器
         redisManager?.broadcast(msg)
     }
 
@@ -137,29 +132,20 @@ class HuHoBotVelocity @Inject constructor(
 
         val msg = String(event.data, Charsets.UTF_8)
         val parts = msg.split("|", limit = 4)
-        if (parts.size < 3) return
+        if (parts.size < 4) return
 
         val action = parts[0]
         if (action != "BIND_RESULT") return
 
         val status = parts[1]
-        val playerName = parts[2]
+        val message = parts[2]
+        val code = parts[3]
 
-        // 通过 code 查找 packId
-        val code = if (parts.size > 3) parts[3] else ""
-        val packId = if (code.isNotEmpty()) packIdMap.remove(code) else null
-
-        val response = if (status == "success") {
-            "${playerName} 绑定成功，已加白名单"
-        } else {
-            "绑定失败: ${playerName}"
-        }
-
+        val packId = packIdMap.remove(code)
         if (packId != null) {
-            ClientManager.postRespone(response, status, packId)
+            ClientManager.postRespone(message, status, packId)
         } else {
-            // 找不到 packId 时，尝试用任意方式发送
-            logger.info("QQ response (no packId): $response")
+            logger.info("QQ response (no packId): $message")
         }
     }
 
@@ -168,9 +154,6 @@ class HuHoBotVelocity @Inject constructor(
         return sender.execute(command)
     }
 
-    /**
-     * 发送命令到指定服务器
-     */
     fun sendCommandToServer(serverName: String, command: String): CompletableFuture<HExecution> {
         val sender = VelocityConsoleSender(this)
         return sender.executeOnServer(serverName, command)
@@ -183,7 +166,7 @@ class HuHoBotVelocity @Inject constructor(
 
     override fun submitLater(delay: Long, task: Runnable): Cancelable {
         val scheduledTask = server.scheduler.buildTask(this, task)
-            .delay(delay * 50, TimeUnit.MILLISECONDS) // Convert ticks to milliseconds
+            .delay(delay * 50, TimeUnit.MILLISECONDS)
             .schedule()
         return HuHoBotTask(scheduledTask)
     }
@@ -196,99 +179,41 @@ class HuHoBotVelocity @Inject constructor(
         return HuHoBotTask(scheduledTask)
     }
 
-    override fun getHashKey(): String {
-        return configManager.getHashKey()
-    }
-
-    override fun getPlatform(): String {
-        return "velocity"
-    }
-
-    override fun getName(): String {
-        return configManager.getName()
-    }
-
-    fun getWhiteList(): WhiteList {
-        return configManager.getWhiteList()
-    }
-
-    override fun getChatFormat(): ChatFormat {
-        return configManager.getChatFormat()
-    }
-
-    override fun getMotd(): Motd {
-        return configManager.getMotd()
-    }
-
-    override fun getConfigFile(): File {
-        return dataDirectory.resolve("config.yml").toFile()
-    }
+    override fun getHashKey(): String = configManager.getHashKey()
+    override fun getPlatform(): String = "velocity"
+    override fun getName(): String = configManager.getName()
+    fun getWhiteList(): WhiteList = configManager.getWhiteList()
+    override fun getChatFormat(): ChatFormat = configManager.getChatFormat()
+    override fun getMotd(): Motd = configManager.getMotd()
+    override fun getConfigFile(): File = dataDirectory.resolve("config.yml").toFile()
 
     override fun addWhiteList(playerName: String) {
-        val command: String = getWhiteList().addCommand.replace("{name}", playerName)
-        // 确保发送到所有服务器，除非明确指定了目标
+        val command = getWhiteList().addCommand.replace("{name}", playerName)
         val finalCommand = if (command.contains(":")) command else "ALL:$command"
         sendCommand(finalCommand)
     }
 
     override fun delWhiteList(playerName: String) {
-        val command: String = getWhiteList().delCommand.replace("{name}", playerName)
-        // 确保发送到所有服务器，除非明确指定了目标
+        val command = getWhiteList().delCommand.replace("{name}", playerName)
         val finalCommand = if (command.contains(":")) command else "ALL:$command"
         sendCommand(finalCommand)
     }
 
-    override fun getPluginVersion(): String {
-        return pluginContainer.description.version.orElse("1.0.0")
-    }
+    override fun getPluginVersion(): String = pluginContainer.description.version.orElse("1.0.0")
+    override fun getServerId(): String = configManager.getServerId()
+    override fun getCallbackConvertImg(): Int = configManager.getCallbackConvertImg()
+    override fun getFilterRegexList(): List<String> = configManager.getFilterRegexList()
 
-    override fun getServerId(): String {
-        return configManager.getServerId()
-    }
+    override fun loadCustomCommand() { configManager.loadCommandsFromConfig() }
+    override fun setHashKey(hashKey: String) { configManager.setHashKey(hashKey) }
+    override fun setServerId(serverId: String) { configManager.setServerId(serverId) }
+    override fun log_info(msg: String) { logger.info(msg) }
+    override fun log_error(msg: String) { logger.error(msg) }
+    override fun log_warning(msg: String) { logger.warn(msg) }
 
-    override fun getCallbackConvertImg(): Int {
-        return configManager.getCallbackConvertImg()
-    }
+    override fun getQueryOnline(): BaseEvent = QueryOnline(this)
+    override fun getQueryAllowList(): BaseEvent = QueryAllowList(this)
 
-    override fun getFilterRegexList(): List<String> {
-        return configManager.getFilterRegexList()
-    }
-
-    override fun loadCustomCommand() {
-        configManager.loadCommandsFromConfig()
-    }
-
-    override fun setHashKey(hashKey: String) {
-        configManager.setHashKey(hashKey)
-    }
-
-    override fun setServerId(serverId: String) {
-        configManager.setServerId(serverId)
-    }
-
-    override fun log_info(msg: String) {
-        logger.info(msg)
-    }
-
-    override fun log_error(msg: String) {
-        logger.error(msg)
-    }
-
-    override fun log_warning(msg: String) {
-        logger.warn(msg)
-    }
-
-    override fun getQueryOnline(): BaseEvent {
-        return QueryOnline(this)
-    }
-
-    override fun getQueryAllowList(): BaseEvent {
-        return QueryAllowList(this)
-    }
-
-    /**
-     * 重新连接 Redis
-     */
     fun reconnectRedis(): Boolean {
         redisManager?.disconnect()
         if (configManager.isRedisEnabled()) {
