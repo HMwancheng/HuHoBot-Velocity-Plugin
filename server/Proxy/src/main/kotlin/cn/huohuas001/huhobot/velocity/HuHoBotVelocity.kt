@@ -20,16 +20,19 @@ import com.alibaba.fastjson2.JSONObject
 import com.google.inject.Inject
 import com.velocitypowered.api.command.CommandMeta
 import com.velocitypowered.api.event.Subscribe
+import com.velocitypowered.api.event.connection.PluginMessageEvent
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent
 import com.velocitypowered.api.plugin.PluginContainer
 import com.velocitypowered.api.plugin.annotation.DataDirectory
+import com.velocitypowered.api.proxy.Player
 import com.velocitypowered.api.proxy.ProxyServer
 import com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier
 import org.slf4j.Logger
 import java.io.File
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class HuHoBotVelocity @Inject constructor(
@@ -45,6 +48,7 @@ class HuHoBotVelocity @Inject constructor(
     override var eventList: MutableMap<String, BaseEvent> = HashMap()
 
     private val whitelistChannel = MinecraftChannelIdentifier.create("huhostdwhitelist", "main")
+    private val packIdMap = ConcurrentHashMap<String, String>()
 
     @Subscribe
     fun onProxyInitialization(event: ProxyInitializeEvent) {
@@ -110,6 +114,9 @@ class HuHoBotVelocity @Inject constructor(
         val openId = author?.getString("openId") ?: ""
 
         if (code.isNotEmpty() && openId.isNotEmpty()) {
+            // 存储 packId，等 Paper 回报后发送 QQ 消息
+            packIdMap[code] = packId
+
             val msg = "BIND|$code|$openId"
             server.allServers.forEach { s ->
                 try {
@@ -122,6 +129,38 @@ class HuHoBotVelocity @Inject constructor(
             return true
         }
         return false
+    }
+
+    @Subscribe
+    fun onPluginMessage(event: PluginMessageEvent) {
+        if (event.identifier != whitelistChannel) return
+
+        val msg = String(event.data, Charsets.UTF_8)
+        val parts = msg.split("|", limit = 4)
+        if (parts.size < 3) return
+
+        val action = parts[0]
+        if (action != "BIND_RESULT") return
+
+        val status = parts[1]
+        val playerName = parts[2]
+
+        // 通过 code 查找 packId
+        val code = if (parts.size > 3) parts[3] else ""
+        val packId = if (code.isNotEmpty()) packIdMap.remove(code) else null
+
+        val response = if (status == "success") {
+            "${playerName} 绑定成功，已加白名单"
+        } else {
+            "绑定失败: ${playerName}"
+        }
+
+        if (packId != null) {
+            ClientManager.postRespone(response, status, packId)
+        } else {
+            // 找不到 packId 时，尝试用任意方式发送
+            logger.info("QQ response (no packId): $response")
+        }
     }
 
     override fun sendCommand(command: String): CompletableFuture<HExecution> {
