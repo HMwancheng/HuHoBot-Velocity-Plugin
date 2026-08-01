@@ -1,0 +1,308 @@
+package cn.huohuas001.bot
+
+import cn.huohuas001.bot.provider.BotShared
+import cn.huohuas001.bot.tools.Cancelable
+import cn.huohuas001.config.WS_SERVER_URL
+import com.alibaba.fastjson2.JSONObject
+import java.net.URI
+import java.net.URISyntaxException
+import kotlin.collections.set
+import kotlin.text.append
+
+object ClientManager {
+    private var client: WsClient? = null
+    private val websocketUrl = WS_SERVER_URL
+
+    private const val RECONNECT_DELAY: Long = 5 // 重连延迟时间，单位为秒
+    private const val MAX_RECONNECT_ATTEMPTS = 5 // 最大重连尝试次数
+    private const val AUTO_DISCONNECT_TICKS: Long = 6 * 60 * 60 * 20L // 自动断开超时时间（6小时，单位为游戏tick）
+    private var ReconnectAttempts = 0
+    private var shouldReconnect = true
+
+    private val isReconnecting = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var currentTask: Cancelable? = null
+    private var autoDisConnectTask: Cancelable? = null
+
+    /**
+     * 设置是否自动重连
+     */
+    fun setShouldReconnect(should: Boolean){
+        shouldReconnect = should
+    }
+
+    /**
+     * 取消当前所有任务
+     */
+    fun cancelCurrentTask() {
+        isReconnecting.set(false)
+        ReconnectAttempts = 0
+        currentTask?.cancel()
+        currentTask = null
+    }
+
+    fun shutdownClient(): Boolean {
+        if (isOpen()) {
+            client!!.close(1000)
+            return true
+        }
+        return false
+    }
+
+    fun getClient(): WsClient{
+        return client!!
+    }
+
+    fun autoDisConnectClient() {
+        val plugin = BotShared.getPlugin()
+        plugin.log_info("连接超时，已自动重连")
+        shutdownClient()
+    }
+
+    fun setAutoDisConnectTask() {
+        val plugin = BotShared.getPlugin()
+        if (autoDisConnectTask == null) {
+            autoDisConnectTask = plugin.submitLater(AUTO_DISCONNECT_TICKS) { this.autoDisConnectClient() }
+        } else {
+            autoDisConnectTask!!.cancel()
+            autoDisConnectTask = null
+            setAutoDisConnectTask()
+        }
+    }
+
+    fun connectServer(): Boolean {
+        synchronized(this) {
+            val plugin = BotShared.getPlugin()
+            plugin.log_info(" 正在连接服务端...")
+            try {
+                val uri = URI(websocketUrl)
+                // 更严格的连接检查
+                if(client != null && client!!.isOpen){
+                    plugin.log_info(" 已存在活跃连接，无需重新连接")
+                    return true
+                }
+                if(client == null || !client!!.isOpen){
+                    client = WsClient(BotShared.getPlugin(), uri)
+                    setShouldReconnect(true) // 设置是否重连
+                    client!!.connect()
+                }
+                return true
+            } catch (e: URISyntaxException) {
+                plugin.log_error(e.stackTrace.toString())
+            }
+            return false
+        }
+    }
+
+    fun isOpen(): Boolean {
+        return client != null && client!!.isOpen
+    }
+
+    fun postHeart() {
+        val plugin = BotShared.getPlugin()
+        client?.sendMessage("heart", JSONObject())
+    }
+
+    fun postChat(playerName: String,message: String){
+        val plugin = BotShared.getPlugin()
+        val chatFormat = plugin.getChatFormat()
+        val format = chatFormat.fromGame
+        val prefix = chatFormat.postPrefix
+        val isPostChat = chatFormat.postChat
+
+        if (message.startsWith(prefix) && isPostChat) {
+            val formatted = format.replace("{name}", playerName)
+                .replace("{msg}", message.substring(prefix.length))
+            val body = JSONObject()
+            body["serverId"] = plugin.getServerId()
+            body["msg"] = formatted
+            client?.sendMessage("chat", body)
+        }
+    }
+
+    fun postCustomChat(formatString: String,msgType: String="聊天"){
+        val plugin = BotShared.getPlugin()
+        val body = JSONObject()
+        body["serverId"] = plugin.getServerId()
+        body["msg"] = formatString
+        body["msgType"] = msgType
+        client?.sendMessage("chat", body)
+    }
+
+    private fun motdMsgBuilder(playerNames: List<String>,textTemplate: String): String {
+        val plugin = BotShared.getPlugin()
+        val motd = plugin.getMotd()
+        val useMarkdown = motd.useMarkdown
+
+        if(useMarkdown){
+            return playerNames.joinToString(", ")
+        }else{
+            val sb = StringBuilder()
+            if (motd.outputOnlineList) {
+                if (playerNames.isNotEmpty()) {
+                    sb.append("\n在线玩家列表：\n")
+                    for (name in playerNames) {
+                        sb.append(name).append("\n")
+                    }
+                } else {
+                    sb.append("\n当前没有在线玩家\n")
+                }
+            }
+
+            val onlineSize = if (motd.outputOnlineList) playerNames.size else -1
+            sb.append(textTemplate.replace("{online}", onlineSize.toString()))
+            return sb.toString()
+        }
+    }
+
+    fun postMotd(playerNames: List<String>,textTemplate: String, packId: String){
+        val plugin = BotShared.getPlugin()
+        val motd = plugin.getMotd()
+        val serverIP: String = motd.serverIP
+        val serverPort: Int = motd.serverPort
+        val api: String = motd.api
+        val postImg = motd.postImg
+        val useMarkdown = motd.useMarkdown
+        // 构造JSON对象
+        val list = JSONObject()
+        val msg = motdMsgBuilder(playerNames,textTemplate)
+        list["msg"] = msg
+        list["url"] = "$serverIP:$serverPort"
+        list["imgUrl"] = api.replace("{server_ip}", serverIP).replace("{server_port}", serverPort.toString())
+        list["post_img"] = postImg
+        list["serverType"] = "java"
+        list["useMarkdown"] = useMarkdown
+        list["serverName"] = plugin.getName()
+        list["currentOnline"] = playerNames.size.toString()
+        if (motd.customMarkdown) {
+            list["customMarkdown"] = readOnlineMarkdown()
+        }
+
+        //封包
+        val rBody = JSONObject()
+        rBody["list"] = list
+
+        //返回消息
+        client?.sendMessage("queryOnline", rBody, packId)
+    }
+
+    private fun readOnlineMarkdown(): String {
+        val plugin = BotShared.getPlugin()
+        val markdownFile = plugin.getConfigFile()?.parentFile?.resolve("online.md")
+        if (markdownFile == null || !markdownFile.isFile) {
+            plugin.log_warning("未找到 online.md 文件, 请检查文件是否存在. 若需自定义, 请新建该文件在config同级目录下.")
+            return ""
+        }
+
+        return runCatching { markdownFile.readText(Charsets.UTF_8) }
+            .onFailure { plugin.log_warning("读取 online.md 失败: ${it.message}") }
+            .getOrDefault("")
+    }
+
+    fun postList(list:String,packId: String){
+        val rBody = JSONObject();
+        rBody["list"] = list;
+        client?.sendMessage("queryWl", rBody, packId);
+    }
+
+    fun postRespone(msg: String,type: String,packId: String){
+        val plugin = BotShared.getPlugin()
+        val callbackConvert = plugin.getCallbackConvertImg()
+        client?.respone(msg,type,callbackConvert,packId)
+    }
+
+    fun postRespone(msg: JSONObject,type: String,packId: String){
+        val plugin = BotShared.getPlugin()
+        val callbackConvert = plugin.getCallbackConvertImg()
+        client?.respone(msg.toJSONString(),type,callbackConvert,packId)
+    }
+
+    /**
+     * 执行重连逻辑
+     */
+    private fun performReconnect() {
+        val plugin = BotShared.getPlugin()
+
+        if (!shouldReconnect) {
+            isReconnecting.set(false)
+            return
+        }
+
+        // 检查次数是否超限
+        if (ReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            plugin.log_warning("重连尝试已达到最大次数，将不再尝试重新连接。")
+            isReconnecting.set(false)
+            ReconnectAttempts = 0
+            return
+        }
+
+        ReconnectAttempts++
+
+        // 检查是否已经有活跃连接
+        if (isOpen()) {
+            plugin.log_info("检测到已有活跃连接，停止重连")
+            isReconnecting.set(false)
+            ReconnectAttempts = 0
+            return
+        }
+
+        plugin.log_info("正在尝试重新连接,这是第($ReconnectAttempts/$MAX_RECONNECT_ATTEMPTS)次连接")
+
+        // 尝试连接
+        if (connectServer()) {
+            // 连接发起成功，1秒后检查连接状态
+            currentTask = plugin.submitLater(20L) {
+                checkConnectionStatus()
+            }
+        } else {
+            // 连接发起失败，进入下一次等待
+            scheduleNextAttempt()
+        }
+    }
+
+    private fun checkConnectionStatus() {
+        val plugin = BotShared.getPlugin()
+        if (isOpen()) {
+            plugin.log_info("重连成功!")
+            isReconnecting.set(false)
+            ReconnectAttempts = 0
+        } else {
+            scheduleNextAttempt()
+        }
+    }
+
+    private fun scheduleNextAttempt() {
+        if (ReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            val plugin = BotShared.getPlugin()
+            // 等待重连延迟
+            currentTask = plugin.submitLater(RECONNECT_DELAY * 20L) {
+                performReconnect()
+            }
+        } else {
+            // 再次调用以触发结束逻辑
+            performReconnect()
+        }
+    }
+
+    fun clientReconnect() {
+        // 使用CAS操作确保只有一个重连任务能启动
+        if (!isReconnecting.compareAndSet(false, true)) {
+            return // 已经有重连任务在运行
+        }
+
+        if (!shouldReconnect) {
+            isReconnecting.set(false)
+            return
+        }
+
+        val plugin = BotShared.getPlugin()
+        ReconnectAttempts = 0 // 重置重连计数
+
+        // 直接执行第一次重连，而不是通过定时器延迟
+        plugin.submitLater(0) {
+            performReconnect()
+        }
+    }
+
+
+
+}
