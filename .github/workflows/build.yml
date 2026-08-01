@@ -4,12 +4,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      wsServerUrl:
-        description: "WebSocket server address"
-        required: false
-        default: "ws://mc.xfywz.cn:25671/"
-        type: string
 
 jobs:
   build:
@@ -27,9 +21,11 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build Proxy module
+        env:
+          WS_SERVER_URL: ${{ secrets.WS_SERVER_URL }}
         run: |
           chmod +x gradlew
-          ./gradlew :server-Proxy:shadowJar -x test --configure-on-demand -Dorg.gradle.daemon=false -PwsServerUrl="${{ inputs.wsServerUrl }}"
+          ./gradlew :server-Proxy:shadowJar -x test --configure-on-demand -Dorg.gradle.daemon=false -PwsServerUrl="$WS_SERVER_URL"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
