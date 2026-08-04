@@ -21,6 +21,7 @@ import com.google.inject.Inject
 import com.velocitypowered.api.command.CommandMeta
 import com.velocitypowered.api.event.Subscribe
 import com.velocitypowered.api.event.connection.PluginMessageEvent
+import com.velocitypowered.api.event.player.ServerPostConnectEvent
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent
 import com.velocitypowered.api.plugin.PluginContainer
@@ -33,6 +34,7 @@ import java.io.File
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 
 class HuHoBotVelocity @Inject constructor(
@@ -49,6 +51,7 @@ class HuHoBotVelocity @Inject constructor(
 
     private val whitelistChannel = MinecraftChannelIdentifier.create("huhostdwhitelist", "main")
     private val packIdMap = ConcurrentHashMap<String, String>()
+    private val pendingBinds = ConcurrentLinkedQueue<String>()
 
     @Subscribe
     fun onProxyInitialization(event: ProxyInitializeEvent) {
@@ -71,6 +74,9 @@ class HuHoBotVelocity @Inject constructor(
         server.eventManager.register(this, GameChat(this))
 
         server.eventManager.register(this, PlayerEvents(this))
+
+        // 注册自身监听 PluginMessageEvent 和 ServerPostConnectEvent
+        server.eventManager.register(this, this)
 
         enableBot()
     }
@@ -113,19 +119,28 @@ class HuHoBotVelocity @Inject constructor(
             packIdMap[code] = packId
 
             val msg = "BIND|$code|$openId"
-            server.allServers.forEach { s ->
-                try {
-                    s.sendPluginMessage(whitelistChannel, msg.toByteArray())
-                } catch (e: Exception) {
-                    logger.warn("Failed to send bind to {}: {}", s.serverInfo.name, e.message)
-                }
-            }
+            // 缓存消息，防止零玩家时消息丢失
+            pendingBinds.add(msg)
+            sendBindToAllServers(msg)
             logger.info("HuHoSTDWhiteList bind: code=$code openId=$openId")
             return true
         }
         return false
     }
 
+    private fun sendBindToAllServers(msg: String) {
+        server.allServers.forEach { s ->
+            try {
+                s.sendPluginMessage(whitelistChannel, msg.toByteArray())
+            } catch (e: Exception) {
+                logger.warn("Failed to send bind to {}: {}", s.serverInfo.name, e.message)
+            }
+        }
+    }
+
+    /**
+     * 接收 Paper 端 BIND_RESULT 回报，直接发送 QQ 消息
+     */
     @Subscribe
     fun onPluginMessage(event: PluginMessageEvent) {
         if (event.identifier != whitelistChannel) return
@@ -146,6 +161,23 @@ class HuHoBotVelocity @Inject constructor(
             ClientManager.postRespone(message, status, packId)
         } else {
             logger.info("QQ response (no packId): $message")
+        }
+    }
+
+    /**
+     * 玩家连入子服时，补发缓存的 BIND 消息
+     */
+    @Subscribe
+    fun onServerPostConnect(event: ServerPostConnectEvent) {
+        val server = event.player.currentServer.orElse(null) ?: return
+        var msg: String?
+        while (pendingBinds.poll().also { msg = it } != null) {
+            try {
+                server.sendPluginMessage(whitelistChannel, msg!!.toByteArray())
+                logger.info("补发缓存 BIND: $msg")
+            } catch (e: Exception) {
+                logger.warn("补发缓存 BIND 失败: {}", e.message)
+            }
         }
     }
 
