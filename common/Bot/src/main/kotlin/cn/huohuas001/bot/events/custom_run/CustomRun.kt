@@ -30,6 +30,7 @@ open class CustomRun: BaseEvent() {
                 val replaceNum = i + 1
                 command = command.replace("&$replaceNum", param[i]!!)
             }
+            command = command.replace("&openId", mBody.getJSONObject("author")?.getString("openId") ?: "")
             if (!isAdmin && result.permission > 0) {
                 respone("权限不足，若您是管理员，请使用/管理员执行", "error")
                 return
